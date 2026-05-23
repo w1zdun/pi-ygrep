@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "autoIndex": true,
+  "autoWatch": true,
+  "defaultSemantic": false,
+  "skipNonGit": false
+}
