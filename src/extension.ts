@@ -84,6 +84,11 @@ const DEFAULT_LIMIT = 100;
 // Kept in sync wherever code calls setWidget("ygrep-status", …).
 const widgetState = { widgetVisible: false };
 
+// Watch daemon state — shadow flag set when this session started a watcher.
+// ygrep has no query API for running watchers, so we track our own starts;
+// it doesn't observe daemons started outside the session.
+const watchState = { startedInSession: false };
+
 function buildStatusLines(
 	cwd: string,
 	status: {
@@ -101,6 +106,7 @@ function buildStatusLines(
 		`Type: ${status.type}`,
 		`Files: ${status.files}`,
 		`Semantic: ${status.semantic ? "✅ yes" : "❌ no"}`,
+		`Watch: ${watchState.startedInSession ? "✅ started (background)" : "❌ not started"}`,
 	];
 	if (!status.indexed) {
 		lines.push("", "Run: /ygrep-rebuild or /ygrep-semantic-rebuild");
@@ -352,6 +358,7 @@ export default async function (pi: ExtensionAPI) {
 				cwd,
 			);
 			if (code === 0) {
+				watchState.startedInSession = true;
 				ctx.ui.notify(
 					`ygrep: watch started — ${stdout || "indexing in background"}`,
 					"info",
@@ -450,6 +457,7 @@ export default async function (pi: ExtensionAPI) {
 				runYgrep(["watch", "--daemon"], cwd)
 					.then(({ code }) => {
 						if (code === 0) {
+							watchState.startedInSession = true;
 							ctx.ui.notify("ygrep: watch started (background)", "info");
 						}
 					})
@@ -476,8 +484,11 @@ export default async function (pi: ExtensionAPI) {
 				ctx.ui.notify(`ygrep: indexed ${files} files`, "info");
 				if (config.autoWatch) {
 					runYgrep(["watch", "--daemon"], cwd)
-						.then(() => {
-							ctx.ui.notify("ygrep: watch started (background)", "info");
+						.then(({ code }) => {
+							if (code === 0) {
+								watchState.startedInSession = true;
+								ctx.ui.notify("ygrep: watch started (background)", "info");
+							}
 						})
 						.catch(() => {});
 				}
@@ -497,5 +508,6 @@ export default async function (pi: ExtensionAPI) {
 	// with a host that already cleared the widget at session boundary.
 	pi.on("session_shutdown", async () => {
 		widgetState.widgetVisible = false;
+		watchState.startedInSession = false;
 	});
 }
