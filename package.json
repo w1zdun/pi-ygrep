@@ -1,0 +1,22 @@
+{
+  "name": "pi-ygrep",
+  "version": "0.1.0",
+  "description": "Pi extension replacing find with ygrep-indexed search",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./dist/extension.js"],
+    "skills": ["./skills"]
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "^1.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
