@@ -80,6 +80,34 @@ const grepSchema = Type.Object({
 
 const DEFAULT_LIMIT = 100;
 
+// Widget toggle state — shadow of ctx.ui widget visibility.
+// Kept in sync wherever code calls setWidget("ygrep-status", …).
+const widgetState = { widgetVisible: false };
+
+function buildStatusLines(
+	cwd: string,
+	status: {
+		indexed: boolean;
+		type: string;
+		files: number;
+		semantic: boolean;
+	},
+	git: boolean,
+): string[] {
+	const lines = [
+		`Workspace: ${cwd}`,
+		`Git repo: ${git ? "✅ yes" : "❌ no"}`,
+		`Indexed: ${status.indexed ? "✅ yes" : "❌ no"}`,
+		`Type: ${status.type}`,
+		`Files: ${status.files}`,
+		`Semantic: ${status.semantic ? "✅ yes" : "❌ no"}`,
+	];
+	if (!status.indexed) {
+		lines.push("", "Run: /ygrep-rebuild or /ygrep-semantic-rebuild");
+	}
+	return lines;
+}
+
 // --- ygrep grep tool ---
 function createYgrepGrepTool(cwd: string) {
 	return {
@@ -271,20 +299,13 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerCommand("ygrep-status", {
 		description: "Show ygrep index status for current workspace",
 		handler: async (_args, ctx) => {
-			const status = await checkIndexStatus(cwd);
-			const git = await isInGitRepo(cwd);
-			const lines = [
-				`Workspace: ${cwd}`,
-				`Git repo: ${git ? "✅ yes" : "❌ no"}`,
-				`Indexed: ${status.indexed ? "✅ yes" : "❌ no"}`,
-				`Type: ${status.type}`,
-				`Files: ${status.files}`,
-				`Semantic: ${status.semantic ? "✅ yes" : "❌ no"}`,
-			];
-			if (!status.indexed) {
-				lines.push("", "Run: /ygrep-rebuild or /ygrep-semantic-rebuild");
-			}
+			const [status, git] = await Promise.all([
+				checkIndexStatus(cwd),
+				isInGitRepo(cwd),
+			]);
+			const lines = buildStatusLines(cwd, status, git);
 			ctx.ui.setWidget("ygrep-status", lines);
+			widgetState.widgetVisible = true;
 		},
 	});
 
@@ -371,6 +392,26 @@ export default async function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("ygrep-widget-toggle", {
+		description: "Toggle ygrep status widget on/off",
+		handler: async (_args, ctx) => {
+			if (widgetState.widgetVisible) {
+				ctx.ui.setWidget("ygrep-status", undefined);
+				widgetState.widgetVisible = false;
+				ctx.ui.notify("ygrep: widget hidden", "info");
+				return;
+			}
+			const [status, git] = await Promise.all([
+				checkIndexStatus(cwd),
+				isInGitRepo(cwd),
+			]);
+			const lines = buildStatusLines(cwd, status, git);
+			ctx.ui.setWidget("ygrep-status", lines);
+			widgetState.widgetVisible = true;
+			ctx.ui.notify("ygrep: widget shown", "info");
+		},
+	});
+
 	pi.registerCommand("ygrep-reset", {
 		description: "Delete current workspace index and rebuild",
 		handler: async (_args, ctx) => {
@@ -450,5 +491,11 @@ export default async function (pi: ExtensionAPI) {
 				"info",
 			);
 		}
+	});
+
+	// Clear shadow state on shutdown so a re-loaded module doesn't disagree
+	// with a host that already cleared the widget at session boundary.
+	pi.on("session_shutdown", async () => {
+		widgetState.widgetVisible = false;
 	});
 }

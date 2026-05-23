@@ -1,6 +1,6 @@
 # ygrep
 
-Fast indexed code search. Replaces standard grep with subtoken matching, multi-word AND logic, and optional semantic search.
+Fast indexed code search. Replaces standard grep with subtoken matching, multi-word AND logic, and optional semantic search. Provides slash commands to manage the index (`/ygrep-status`, `/ygrep-rebuild`, `/ygrep-semantic-rebuild`, `/ygrep-watch`, `/ygrep-indexes`, `/ygrep-clean`, `/ygrep-reset`) and to show/hide the status widget (`/ygrep-widget-toggle`). Trigger on "ygrep status", "rebuild ygrep index", "toggle ygrep widget", "show/hide ygrep widget", "ygrep watch", "clean ygrep indexes".
 
 ## When to Use
 

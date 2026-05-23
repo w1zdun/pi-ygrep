@@ -85,6 +85,7 @@ src/api/handler.py:42 (95%)
 | `/ygrep-indexes` | List all indexed workspaces |
 | `/ygrep-clean` | Remove unused indexes |
 | `/ygrep-reset` | Delete current index + rebuild |
+| `/ygrep-widget-toggle` | Show/hide the status widget |
 
 ## Config
 
