@@ -5,7 +5,7 @@
   "type": "module",
   "keywords": ["pi-package"],
   "pi": {
-    "extensions": ["./dist/extension.js"],
+    "extensions": ["./src/extension.ts"],
     "skills": ["./skills"]
   },
   "scripts": {
