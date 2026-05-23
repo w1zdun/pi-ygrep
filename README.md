@@ -16,26 +16,14 @@ Pi extension replacing `grep` with [ygrep](https://github.com/yetidevworks/ygrep
 ## Install
 
 ```bash
-# Via pi (global)
+# Global
 pi install git:github.com/w1zdun/pi-ygrep
 
-# Via pi (project-local)
+# Project-local
 pi install git:github.com/w1zdun/pi-ygrep -l
 ```
 
-Or manually:
-
-```bash
-git clone https://github.com/w1zdun/pi-ygrep.git
-cd pi-ygrep
-npm install && npx tsc
-
-# Link to pi (global)
-ln -sf $(pwd) ~/.pi/agent/extensions/ygrep
-
-# Or project-local
-ln -sf $(pwd) .pi/extensions/ygrep
-```
+Pi loads `src/extension.ts` directly (via jiti) — no build step.
 
 ## Setup
 

@@ -9,8 +9,7 @@
     "skills": ["./skills"]
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
+    "check": "tsc --noEmit"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "*",
