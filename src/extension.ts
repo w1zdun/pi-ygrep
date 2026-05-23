@@ -1,6 +1,38 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+
+// --- Config ---
+export interface YgrepConfig {
+	enabled: boolean;
+	autoIndex: boolean;
+	autoWatch: boolean;
+	defaultSemantic: boolean;
+	skipNonGit: boolean;
+}
+
+const DEFAULT_CONFIG: YgrepConfig = {
+	enabled: true,
+	autoIndex: true,
+	autoWatch: true,
+	defaultSemantic: false,
+	skipNonGit: false,
+};
+
+function loadConfig(cwd: string): YgrepConfig {
+	const projectPath = join(cwd, ".pi", "extensions", "ygrep.json");
+	const globalPath = join(process.env.HOME || "", ".pi", "agent", "extensions", "ygrep.json");
+	const path = existsSync(projectPath) ? projectPath : existsSync(globalPath) ? globalPath : null;
+	if (!path) return DEFAULT_CONFIG;
+	try {
+		return { ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(path, "utf-8")) };
+	} catch {
+		return DEFAULT_CONFIG;
+	}
+}
 
 // --- Schema (compatible with built-in grep) ---
 const grepSchema = Type.Object({
@@ -145,7 +177,10 @@ function createYgrepGrepTool(cwd: string) {
 }
 
 // --- ygrep helpers ---
-function runYgrep(args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
+function runYgrep(
+	args: string[],
+	cwd: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise((resolve) => {
 		const child: ChildProcess = spawn("ygrep", args, {
 			stdio: ["ignore", "pipe", "pipe"],
@@ -155,7 +190,9 @@ function runYgrep(args: string[], cwd: string): Promise<{ code: number; stdout: 
 		const stderrChunks: Buffer[] = [];
 		child.stdout!.on("data", (c: Buffer) => stdoutChunks.push(c));
 		child.stderr!.on("data", (c: Buffer) => stderrChunks.push(c));
-		child.on("error", () => resolve({ code: 1, stdout: "", stderr: "ygrep not found" }));
+		child.on("error", () =>
+			resolve({ code: 1, stdout: "", stderr: "ygrep not found" }),
+		);
 		child.on("close", (code) => {
 			resolve({
 				code: code ?? 1,
@@ -168,21 +205,37 @@ function runYgrep(args: string[], cwd: string): Promise<{ code: number; stdout: 
 
 function isInGitRepo(cwd: string): Promise<boolean> {
 	return new Promise((resolve) => {
-		const child: ChildProcess = spawn("git", ["rev-parse", "--is-inside-work-tree"], {
-			stdio: ["ignore", "pipe", "ignore"],
-			cwd,
-		});
+		const child: ChildProcess = spawn(
+			"git",
+			["rev-parse", "--is-inside-work-tree"],
+			{
+				stdio: ["ignore", "pipe", "ignore"],
+				cwd,
+			},
+		);
 		let stdout = "";
 		child.stdout!.on("data", (c: Buffer) => (stdout += c.toString()));
-		child.on("close", (code) => resolve(code === 0 && stdout.trim() === "true"));
+		child.on("close", (code) =>
+			resolve(code === 0 && stdout.trim() === "true"),
+		);
 	});
 }
 
-function checkIndexStatus(cwd: string): Promise<{ indexed: boolean; type: string; files: number; semantic: boolean }> {
+function checkIndexStatus(
+	cwd: string,
+): Promise<{
+	indexed: boolean;
+	type: string;
+	files: number;
+	semantic: boolean;
+}> {
 	return runYgrep(["status"], cwd).then(({ stdout }) => {
 		const indexed = stdout.includes("Indexed: yes");
 		const type = stdout.match(/Index type: (.+)/)?.[1] || "unknown";
-		const files = parseInt(stdout.match(/Files indexed: (\d+)/)?.[1] || "0", 10);
+		const files = parseInt(
+			stdout.match(/Files indexed: (\d+)/)?.[1] || "0",
+			10,
+		);
 		const semantic = type.includes("semantic");
 		return { indexed, type, files, semantic };
 	});
@@ -191,6 +244,18 @@ function checkIndexStatus(cwd: string): Promise<{ indexed: boolean; type: string
 // --- Extension entry ---
 export default async function (pi: ExtensionAPI) {
 	const cwd = process.cwd();
+	const config = loadConfig(cwd);
+
+	if (!config.enabled) {
+		pi.registerCommand("ygrep-status", {
+			description: "Show ygrep index status for current workspace",
+			handler: async (_args, ctx) => {
+				ctx.ui.notify("ygrep: disabled in config", "info");
+			},
+		});
+		return;
+	}
+
 	const grepTool = createYgrepGrepTool(cwd);
 	pi.registerTool(grepTool);
 
@@ -209,7 +274,7 @@ export default async function (pi: ExtensionAPI) {
 				`Semantic: ${status.semantic ? "✅ yes" : "❌ no"}`,
 			];
 			if (!status.indexed) {
-				lines.push("", "Run: ygrep index (text) or ygrep index --semantic");
+				lines.push("", "Run: /ygrep-rebuild or /ygrep-semantic-rebuild");
 			}
 			ctx.ui.setWidget("ygrep-status", lines);
 		},
@@ -232,8 +297,14 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerCommand("ygrep-semantic-rebuild", {
 		description: "Rebuild ygrep index with semantic search (slower)",
 		handler: async (_args, ctx) => {
-			ctx.ui.notify("ygrep: rebuilding semantic index (this may take a while)...", "info");
-			const { code, stdout, stderr } = await runYgrep(["index", "--semantic"], cwd);
+			ctx.ui.notify(
+				"ygrep: rebuilding semantic index (this may take a while)...",
+				"info",
+			);
+			const { code, stdout, stderr } = await runYgrep(
+				["index", "--semantic"],
+				cwd,
+			);
 			if (code === 0) {
 				const files = stdout.match(/Files indexed: (\d+)/)?.[1] || "?";
 				ctx.ui.notify(`ygrep: semantic index rebuilt (${files} files)`, "info");
@@ -247,9 +318,15 @@ export default async function (pi: ExtensionAPI) {
 		description: "Toggle ygrep watch mode (auto-update index on file changes)",
 		handler: async (_args, ctx) => {
 			ctx.ui.notify("ygrep: starting watch mode (background)...", "info");
-			const { code, stdout, stderr } = await runYgrep(["watch", "--daemon"], cwd);
+			const { code, stdout, stderr } = await runYgrep(
+				["watch", "--daemon"],
+				cwd,
+			);
 			if (code === 0) {
-				ctx.ui.notify(`ygrep: watch started — ${stdout || "indexing in background"}`, "info");
+				ctx.ui.notify(
+					`ygrep: watch started — ${stdout || "indexing in background"}`,
+					"info",
+				);
 			} else {
 				ctx.ui.notify(`ygrep: ${stderr || "watch not supported"}`, "error");
 			}
@@ -263,7 +340,10 @@ export default async function (pi: ExtensionAPI) {
 			if (stderr && !stdout) {
 				ctx.ui.notify(`ygrep: ${stderr}`, "error");
 			} else {
-				ctx.ui.setWidget("ygrep-indexes", stdout ? stdout.split("\n") : ["No indexes found"]);
+				ctx.ui.setWidget(
+					"ygrep-indexes",
+					stdout ? stdout.split("\n") : ["No indexes found"],
+				);
 			}
 		},
 	});
@@ -271,7 +351,10 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerCommand("ygrep-clean", {
 		description: "Remove unused ygrep indexes",
 		handler: async (_args, ctx) => {
-			const { code, stdout, stderr } = await runYgrep(["indexes", "clean"], cwd);
+			const { code, stdout, stderr } = await runYgrep(
+				["indexes", "clean"],
+				cwd,
+			);
 			if (code === 0) {
 				ctx.ui.notify(`ygrep: ${stdout || "nothing to clean"}`, "info");
 			} else {
@@ -280,27 +363,77 @@ export default async function (pi: ExtensionAPI) {
 		},
 	});
 
-	// --- Auto-index on session start ---
+	pi.registerCommand("ygrep-reset", {
+		description: "Delete current workspace index and rebuild",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify("ygrep: deleting current index...", "info");
+			const { code, stderr } = await runYgrep(
+				["indexes", "remove", cwd],
+				cwd,
+			);
+			if (code === 0 || stderr.includes("not found")) {
+				ctx.ui.notify("ygrep: rebuilding index...", "info");
+				const { code: code2, stdout: out2 } = await runYgrep(
+					["index", ...(config.defaultSemantic ? ["--semantic"] : [])],
+					cwd,
+				);
+				if (code2 === 0) {
+					const files = out2.match(/Files indexed: (\d+)/)?.[1] || "?";
+					const type = config.defaultSemantic ? "semantic" : "text";
+					ctx.ui.notify(`ygrep: ${type} index rebuilt (${files} files)`, "info");
+				} else {
+					ctx.ui.notify(`ygrep: rebuild failed: ${stderr}`, "error");
+				}
+			} else {
+				ctx.ui.notify(`ygrep: ${stderr || "failed"}`, "error");
+			}
+		},
+	});
+
+	// --- Auto-index + auto-watch on session start ---
 	pi.on("session_start", async (_event, ctx) => {
 		const git = await isInGitRepo(cwd);
 		const status = await checkIndexStatus(cwd);
 
 		if (status.indexed) {
-			const semanticNote = status.semantic ? "" : " (text-only — run /ygrep-semantic-rebuild for semantic)";
-			ctx.ui.notify(`ygrep: active (${status.files} files, ${status.type})${semanticNote}`, "info");
-		} else if (git) {
-			// In a git repo — auto-index
-			ctx.ui.notify("ygrep: no index found, building text index...", "info");
-			const { code, stdout } = await runYgrep(["index"], cwd);
+			// Index exists — start watch if configured
+			if (config.autoWatch) {
+				runYgrep(["watch", "--daemon"], cwd).then(({ code }) => {
+					if (code === 0) {
+						ctx.ui.notify("ygrep: watch started (background)", "info");
+					}
+				}).catch(() => {});
+			}
+
+			const semanticNote = status.semantic
+				? ""
+				: " (text-only — run /ygrep-semantic-rebuild for semantic)";
+			ctx.ui.notify(
+				`ygrep: active (${status.files} files, ${status.type})${semanticNote}`,
+				"info",
+			);
+		} else if (git && config.autoIndex) {
+			// Git repo + no index — auto-index
+			const semanticFlag = config.defaultSemantic ? ["--semantic"] : [];
+			ctx.ui.notify(`ygrep: no index, building ${config.defaultSemantic ? "semantic" : "text"} index...`, "info");
+			const { code, stdout } = await runYgrep(["index", ...semanticFlag], cwd);
 			if (code === 0) {
 				const files = stdout.match(/Files indexed: (\d+)/)?.[1] || "?";
 				ctx.ui.notify(`ygrep: indexed ${files} files`, "info");
+				if (config.autoWatch) {
+					runYgrep(["watch", "--daemon"], cwd).then(() => {
+						ctx.ui.notify("ygrep: watch started (background)", "info");
+					}).catch(() => {});
+				}
 			} else {
 				ctx.ui.notify("ygrep: index build failed", "error");
 			}
-		} else {
-			// Not in a git repo — ask user
-			ctx.ui.notify("ygrep: not in a git repo. Run /ygrep-rebuild to index, or /ygrep-status for details.", "info");
+		} else if (!git && !config.skipNonGit) {
+			// Not in git repo — offer to index
+			ctx.ui.notify(
+				"ygrep: not in a git repo. Run /ygrep-rebuild to index this folder, or /ygrep-status for details.",
+				"info",
+			);
 		}
 	});
 }
