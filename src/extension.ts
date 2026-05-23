@@ -94,7 +94,6 @@ function buildStatusLines(
 	status: {
 		indexed: boolean;
 		type: string;
-		files: number;
 		semantic: boolean;
 	},
 	git: boolean,
@@ -104,7 +103,6 @@ function buildStatusLines(
 		`Git repo: ${git ? "✅ yes" : "❌ no"}`,
 		`Indexed: ${status.indexed ? "✅ yes" : "❌ no"}`,
 		`Type: ${status.type}`,
-		`Files: ${status.files}`,
 		`Semantic: ${status.semantic ? "✅ yes" : "❌ no"}`,
 		`Watch: ${watchState.startedInSession ? "✅ started (background)" : "❌ not started"}`,
 	];
@@ -221,6 +219,35 @@ function createYgrepGrepTool(cwd: string) {
 }
 
 // --- ygrep helpers ---
+// `ygrep watch` is blocking by design (no --daemon flag). Spawn it detached so
+// the parent (pi) doesn't keep it tied to its lifecycle. Resolves true once the
+// child has stayed alive briefly without exiting/erroring.
+function startYgrepWatchDetached(cwd: string): Promise<boolean> {
+	return new Promise((resolve) => {
+		let child: ChildProcess;
+		try {
+			child = spawn("ygrep", ["watch"], {
+				cwd,
+				stdio: "ignore",
+				detached: true,
+			});
+		} catch {
+			resolve(false);
+			return;
+		}
+		child.unref();
+		let settled = false;
+		const settle = (ok: boolean) => {
+			if (settled) return;
+			settled = true;
+			resolve(ok);
+		};
+		child.on("error", () => settle(false));
+		child.on("exit", () => settle(false));
+		setTimeout(() => settle(true), 200);
+	});
+}
+
 function runYgrep(
 	args: string[],
 	cwd: string,
@@ -268,18 +295,13 @@ function isInGitRepo(cwd: string): Promise<boolean> {
 function checkIndexStatus(cwd: string): Promise<{
 	indexed: boolean;
 	type: string;
-	files: number;
 	semantic: boolean;
 }> {
 	return runYgrep(["status"], cwd).then(({ stdout }) => {
 		const indexed = stdout.includes("Indexed: yes");
 		const type = stdout.match(/Index type: (.+)/)?.[1] || "unknown";
-		const files = parseInt(
-			stdout.match(/Files indexed: (\d+)/)?.[1] || "0",
-			10,
-		);
 		const semantic = type.includes("semantic");
-		return { indexed, type, files, semantic };
+		return { indexed, type, semantic };
 	});
 }
 
@@ -350,21 +372,15 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("ygrep-watch", {
-		description: "Toggle ygrep watch mode (auto-update index on file changes)",
+		description: "Start ygrep watch in background (auto-update index on file changes)",
 		handler: async (_args, ctx) => {
 			ctx.ui.notify("ygrep: starting watch mode (background)...", "info");
-			const { code, stdout, stderr } = await runYgrep(
-				["watch", "--daemon"],
-				cwd,
-			);
-			if (code === 0) {
+			const ok = await startYgrepWatchDetached(cwd);
+			if (ok) {
 				watchState.startedInSession = true;
-				ctx.ui.notify(
-					`ygrep: watch started — ${stdout || "indexing in background"}`,
-					"info",
-				);
+				ctx.ui.notify("ygrep: watch started (background)", "info");
 			} else {
-				ctx.ui.notify(`ygrep: ${stderr || "watch not supported"}`, "error");
+				ctx.ui.notify("ygrep: failed to start watch", "error");
 			}
 		},
 	});
@@ -454,21 +470,19 @@ export default async function (pi: ExtensionAPI) {
 		if (status.indexed) {
 			// Index exists — start watch if configured
 			if (config.autoWatch) {
-				runYgrep(["watch", "--daemon"], cwd)
-					.then(({ code }) => {
-						if (code === 0) {
-							watchState.startedInSession = true;
-							ctx.ui.notify("ygrep: watch started (background)", "info");
-						}
-					})
-					.catch(() => {});
+				startYgrepWatchDetached(cwd).then((ok) => {
+					if (ok) {
+						watchState.startedInSession = true;
+						ctx.ui.notify("ygrep: watch started (background)", "info");
+					}
+				});
 			}
 
 			const semanticNote = status.semantic
 				? ""
 				: " (text-only — run /ygrep-semantic-rebuild for semantic)";
 			ctx.ui.notify(
-				`ygrep: active (${status.files} files, ${status.type})${semanticNote}`,
+				`ygrep: active (${status.type})${semanticNote}`,
 				"info",
 			);
 		} else if (git && config.autoIndex) {
@@ -483,14 +497,12 @@ export default async function (pi: ExtensionAPI) {
 				const files = stdout.match(/Files indexed: (\d+)/)?.[1] || "?";
 				ctx.ui.notify(`ygrep: indexed ${files} files`, "info");
 				if (config.autoWatch) {
-					runYgrep(["watch", "--daemon"], cwd)
-						.then(({ code }) => {
-							if (code === 0) {
-								watchState.startedInSession = true;
-								ctx.ui.notify("ygrep: watch started (background)", "info");
-							}
-						})
-						.catch(() => {});
+					startYgrepWatchDetached(cwd).then((ok) => {
+						if (ok) {
+							watchState.startedInSession = true;
+							ctx.ui.notify("ygrep: watch started (background)", "info");
+						}
+					});
 				}
 			} else {
 				ctx.ui.notify("ygrep: index build failed", "error");
