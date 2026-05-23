@@ -1,6 +1,10 @@
 # pi-ygrep
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Pi extension replacing `grep` with [ygrep](https://github.com/yetidevworks/ygrep) indexed search.
+
+**Author:** [w1zdun](https://github.com/w1zdun)
 
 ## Features
 
@@ -60,6 +64,40 @@ src/api/handler.py:42 (95%)
 ~ src/models/user.py:103 (72%)   # semantic only
 ```
 
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/ygrep-status` | Show index status (files, type, semantic) |
+| `/ygrep-rebuild` | Rebuild text-only index (fast) |
+| `/ygrep-semantic-rebuild` | Rebuild with semantic search (slower) |
+| `/ygrep-watch` | Start watch mode (background) |
+| `/ygrep-indexes` | List all indexed workspaces |
+| `/ygrep-clean` | Remove unused indexes |
+| `/ygrep-reset` | Delete current index + rebuild |
+
+## Config
+
+Create `.pi/extensions/ygrep.json` (project) or `~/.pi/agent/extensions/ygrep.json` (global):
+
+```json
+{
+  "enabled": true,
+  "autoIndex": true,
+  "autoWatch": true,
+  "defaultSemantic": false,
+  "skipNonGit": false
+}
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Master switch |
+| `autoIndex` | `true` | Auto-build index on session start (git repos) |
+| `autoWatch` | `true` | Start `ygrep watch --daemon` in background |
+| `defaultSemantic` | `false` | Use semantic index by default |
+| `skipNonGit` | `false` | Skip non-git folders entirely |
+
 ## Files
 
 | File | Purpose |
@@ -67,3 +105,8 @@ src/api/handler.py:42 (95%)
 | `src/extension.ts` | Pi extension (overrides `grep` tool) |
 | `skills/ygrep/SKILL.md` | Skill for indexing + usage patterns |
 | `package.json` | Dependencies + pi manifest |
+| `ygrep.json.example` | Config template |
+
+## License
+
+MIT — Copyright (c) 2026 w1zdun
