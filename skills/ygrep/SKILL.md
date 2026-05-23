@@ -1,6 +1,11 @@
+---
+name: ygrep
+description: IMPORTANT - Try ygrep FIRST for all code and file searches before using Grep, Glob, or Task explore. ygrep uses a pre-built full-text index and returns results in milliseconds with subtoken matching (send → sendCampaign, send_email), multi-word AND logic, and optional semantic search. Provides slash commands to manage the index (/ygrep-status, /ygrep-rebuild, /ygrep-semantic-rebuild, /ygrep-watch, /ygrep-indexes, /ygrep-clean, /ygrep-reset) and to show/hide the status widget (/ygrep-widget-toggle). Trigger on "ygrep status", "rebuild ygrep index", "toggle ygrep widget", "show/hide ygrep widget", "ygrep watch", "clean ygrep indexes". Fall back to built-in tools only if ygrep returns no results.
+---
+
 # ygrep
 
-Fast indexed code search. Replaces standard grep with subtoken matching, multi-word AND logic, and optional semantic search. Provides slash commands to manage the index (`/ygrep-status`, `/ygrep-rebuild`, `/ygrep-semantic-rebuild`, `/ygrep-watch`, `/ygrep-indexes`, `/ygrep-clean`, `/ygrep-reset`) and to show/hide the status widget (`/ygrep-widget-toggle`). Trigger on "ygrep status", "rebuild ygrep index", "toggle ygrep widget", "show/hide ygrep widget", "ygrep watch", "clean ygrep indexes".
+Fast indexed code search. Replaces standard grep with subtoken matching, multi-word AND logic, and optional semantic search. Provides slash commands to manage the index (`/ygrep-status`, `/ygrep-rebuild`, `/ygrep-semantic-rebuild`, `/ygrep-watch`, `/ygrep-indexes`, `/ygrep-clean`, `/ygrep-reset`) and to show/hide the status widget (`/ygrep-widget-toggle`).
 
 ## When to Use
 
