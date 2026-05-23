@@ -144,12 +144,163 @@ function createYgrepGrepTool(cwd: string) {
 	};
 }
 
+// --- ygrep helpers ---
+function runYgrep(args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
+	return new Promise((resolve) => {
+		const child: ChildProcess = spawn("ygrep", args, {
+			stdio: ["ignore", "pipe", "pipe"],
+			cwd,
+		});
+		const stdoutChunks: Buffer[] = [];
+		const stderrChunks: Buffer[] = [];
+		child.stdout!.on("data", (c: Buffer) => stdoutChunks.push(c));
+		child.stderr!.on("data", (c: Buffer) => stderrChunks.push(c));
+		child.on("error", () => resolve({ code: 1, stdout: "", stderr: "ygrep not found" }));
+		child.on("close", (code) => {
+			resolve({
+				code: code ?? 1,
+				stdout: Buffer.concat(stdoutChunks).toString().trim(),
+				stderr: Buffer.concat(stderrChunks).toString().trim(),
+			});
+		});
+	});
+}
+
+function isInGitRepo(cwd: string): Promise<boolean> {
+	return new Promise((resolve) => {
+		const child: ChildProcess = spawn("git", ["rev-parse", "--is-inside-work-tree"], {
+			stdio: ["ignore", "pipe", "ignore"],
+			cwd,
+		});
+		let stdout = "";
+		child.stdout!.on("data", (c: Buffer) => (stdout += c.toString()));
+		child.on("close", (code) => resolve(code === 0 && stdout.trim() === "true"));
+	});
+}
+
+function checkIndexStatus(cwd: string): Promise<{ indexed: boolean; type: string; files: number; semantic: boolean }> {
+	return runYgrep(["status"], cwd).then(({ stdout }) => {
+		const indexed = stdout.includes("Indexed: yes");
+		const type = stdout.match(/Index type: (.+)/)?.[1] || "unknown";
+		const files = parseInt(stdout.match(/Files indexed: (\d+)/)?.[1] || "0", 10);
+		const semantic = type.includes("semantic");
+		return { indexed, type, files, semantic };
+	});
+}
+
 // --- Extension entry ---
-export default function (pi: ExtensionAPI) {
-	const grepTool = createYgrepGrepTool(process.cwd());
+export default async function (pi: ExtensionAPI) {
+	const cwd = process.cwd();
+	const grepTool = createYgrepGrepTool(cwd);
 	pi.registerTool(grepTool);
 
+	// --- Commands ---
+	pi.registerCommand("ygrep-status", {
+		description: "Show ygrep index status for current workspace",
+		handler: async (_args, ctx) => {
+			const status = await checkIndexStatus(cwd);
+			const git = await isInGitRepo(cwd);
+			const lines = [
+				`Workspace: ${cwd}`,
+				`Git repo: ${git ? "✅ yes" : "❌ no"}`,
+				`Indexed: ${status.indexed ? "✅ yes" : "❌ no"}`,
+				`Type: ${status.type}`,
+				`Files: ${status.files}`,
+				`Semantic: ${status.semantic ? "✅ yes" : "❌ no"}`,
+			];
+			if (!status.indexed) {
+				lines.push("", "Run: ygrep index (text) or ygrep index --semantic");
+			}
+			ctx.ui.setWidget("ygrep-status", lines);
+		},
+	});
+
+	pi.registerCommand("ygrep-rebuild", {
+		description: "Rebuild ygrep text-only index (fast)",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify("ygrep: rebuilding text index...", "info");
+			const { code, stdout, stderr } = await runYgrep(["index"], cwd);
+			if (code === 0) {
+				const files = stdout.match(/Files indexed: (\d+)/)?.[1] || "?";
+				ctx.ui.notify(`ygrep: text index rebuilt (${files} files)`, "info");
+			} else {
+				ctx.ui.notify(`ygrep: ${stderr || "failed"}`, "error");
+			}
+		},
+	});
+
+	pi.registerCommand("ygrep-semantic-rebuild", {
+		description: "Rebuild ygrep index with semantic search (slower)",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify("ygrep: rebuilding semantic index (this may take a while)...", "info");
+			const { code, stdout, stderr } = await runYgrep(["index", "--semantic"], cwd);
+			if (code === 0) {
+				const files = stdout.match(/Files indexed: (\d+)/)?.[1] || "?";
+				ctx.ui.notify(`ygrep: semantic index rebuilt (${files} files)`, "info");
+			} else {
+				ctx.ui.notify(`ygrep: ${stderr || "failed"}`, "error");
+			}
+		},
+	});
+
+	pi.registerCommand("ygrep-watch", {
+		description: "Toggle ygrep watch mode (auto-update index on file changes)",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify("ygrep: starting watch mode (background)...", "info");
+			const { code, stdout, stderr } = await runYgrep(["watch", "--daemon"], cwd);
+			if (code === 0) {
+				ctx.ui.notify(`ygrep: watch started — ${stdout || "indexing in background"}`, "info");
+			} else {
+				ctx.ui.notify(`ygrep: ${stderr || "watch not supported"}`, "error");
+			}
+		},
+	});
+
+	pi.registerCommand("ygrep-indexes", {
+		description: "List all ygrep indexed workspaces",
+		handler: async (_args, ctx) => {
+			const { stdout, stderr } = await runYgrep(["indexes", "list"], cwd);
+			if (stderr && !stdout) {
+				ctx.ui.notify(`ygrep: ${stderr}`, "error");
+			} else {
+				ctx.ui.setWidget("ygrep-indexes", stdout ? stdout.split("\n") : ["No indexes found"]);
+			}
+		},
+	});
+
+	pi.registerCommand("ygrep-clean", {
+		description: "Remove unused ygrep indexes",
+		handler: async (_args, ctx) => {
+			const { code, stdout, stderr } = await runYgrep(["indexes", "clean"], cwd);
+			if (code === 0) {
+				ctx.ui.notify(`ygrep: ${stdout || "nothing to clean"}`, "info");
+			} else {
+				ctx.ui.notify(`ygrep: ${stderr || "failed"}`, "error");
+			}
+		},
+	});
+
+	// --- Auto-index on session start ---
 	pi.on("session_start", async (_event, ctx) => {
-		ctx.ui.notify("ygrep: active (grep → ygrep indexed search)", "info");
+		const git = await isInGitRepo(cwd);
+		const status = await checkIndexStatus(cwd);
+
+		if (status.indexed) {
+			const semanticNote = status.semantic ? "" : " (text-only — run /ygrep-semantic-rebuild for semantic)";
+			ctx.ui.notify(`ygrep: active (${status.files} files, ${status.type})${semanticNote}`, "info");
+		} else if (git) {
+			// In a git repo — auto-index
+			ctx.ui.notify("ygrep: no index found, building text index...", "info");
+			const { code, stdout } = await runYgrep(["index"], cwd);
+			if (code === 0) {
+				const files = stdout.match(/Files indexed: (\d+)/)?.[1] || "?";
+				ctx.ui.notify(`ygrep: indexed ${files} files`, "info");
+			} else {
+				ctx.ui.notify("ygrep: index build failed", "error");
+			}
+		} else {
+			// Not in a git repo — ask user
+			ctx.ui.notify("ygrep: not in a git repo. Run /ygrep-rebuild to index, or /ygrep-status for details.", "info");
+		}
 	});
 }
