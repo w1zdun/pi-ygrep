@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -156,16 +156,36 @@ function createYgrepGrepTool(cwd: string) {
 		}> {
 			if (signal?.aborted) throw new Error("Aborted");
 
-			const { pattern, path: searchDir, glob, context, limit } = input;
+			const { pattern, path: searchPath, glob, context, limit } = input;
 			const effectiveLimit = limit ?? DEFAULT_LIMIT;
 
 			const args: string[] = [pattern, "-n", String(effectiveLimit)];
 
-			if (searchDir) {
-				args.push("-C", `${cwd}/${searchDir}`);
-			} else {
-				args.push("-C", cwd);
+			// Path semantics: -C is the (indexed) workspace root, -p is a
+			// path/glob filter inside it. If `path` is empty → search the whole
+			// cwd workspace. If it's inside cwd → keep cwd as workspace and
+			// pass the relative remainder via -p. If it's outside cwd → treat
+			// it as a separate workspace root.
+			let workspace = cwd;
+			let pathFilter: string | undefined;
+			if (searchPath) {
+				const expanded = searchPath.startsWith("~/")
+					? join(process.env.HOME || "", searchPath.slice(2))
+					: searchPath;
+				const absolute = isAbsolute(expanded)
+					? resolve(expanded)
+					: resolve(cwd, expanded);
+				if (absolute === cwd) {
+					workspace = cwd;
+				} else if (absolute.startsWith(`${cwd}/`)) {
+					workspace = cwd;
+					pathFilter = absolute.slice(cwd.length + 1);
+				} else {
+					workspace = absolute;
+				}
 			}
+			args.push("-C", workspace);
+			if (pathFilter) args.push("-p", pathFilter);
 
 			if (glob) {
 				const ext = glob.replace(/[*?.]/g, "");
