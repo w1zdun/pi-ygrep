@@ -54,7 +54,7 @@ const grepSchema = Type.Object({
 	path: Type.Optional(
 		Type.String({
 			description:
-				"File or directory to scope the search. Resolved relative to cwd; '~/' expands to home. Paths inside cwd filter results (text-only, semantic search is disabled when path is set); absolute paths outside cwd switch workspace (must be pre-indexed).",
+				"File or directory to scope the search. Resolved relative to cwd; '~/' expands to home. Paths inside cwd filter results (text-only, semantic search is disabled when path is set). Paths outside cwd fall back to ripgrep/grep (real-time, no index, literal matching only).",
 		}),
 	),
 	glob: Type.Optional(
@@ -199,7 +199,17 @@ function createYgrepGrepTool(cwd: string) {
 						}
 						pathFilter = isDir ? `${rel}/` : rel;
 					} else {
-						workspace = absolute;
+						// Outside cwd → fall back to ripgrep/grep. ygrep would
+						// need a separate indexed+watched workspace; the
+						// extension only manages one (cwd).
+						return runFallbackGrep({
+							pattern,
+							target: absolute,
+							glob,
+							context,
+							limit: effectiveLimit,
+							signal,
+						});
 					}
 				}
 			}
@@ -264,6 +274,106 @@ function createYgrepGrepTool(cwd: string) {
 			});
 		},
 	};
+}
+
+// External-path fallback: when `path` resolves outside cwd, ygrep would need
+// to switch to a workspace we don't index or watch. Use ripgrep (preferred —
+// fast, gitignore-aware) or plain grep instead. Literal matching, no
+// semantic, but always fresh and never errors on "workspace not indexed".
+type FallbackResult = {
+	content: Array<{ type: "text"; text: string }>;
+	details: Record<string, unknown>;
+};
+
+function runFallbackGrep(opts: {
+	pattern: string;
+	target: string;
+	glob?: string;
+	context?: number;
+	limit: number;
+	signal?: AbortSignal;
+}): Promise<FallbackResult> {
+	const { pattern, target, glob, context, limit, signal } = opts;
+	const ext = glob?.match(/(?:^|\.)([a-zA-Z0-9]+)$/)?.[1];
+
+	const runOne = (
+		cmd: "rg" | "grep",
+	): Promise<{
+		enoent: boolean;
+		code: number;
+		stdout: string;
+		stderr: string;
+	}> =>
+		new Promise((res) => {
+			const args =
+				cmd === "rg"
+					? [
+							"--line-number",
+							"--no-heading",
+							"--color=never",
+							"-i",
+							"-F",
+							...(context ? ["-C", String(context)] : []),
+							...(ext ? ["-g", `*.${ext}`] : []),
+							"--",
+							pattern,
+							target,
+						]
+					: [
+							"-rniF",
+							...(context ? ["-C", String(context)] : []),
+							...(ext ? [`--include=*.${ext}`] : []),
+							"-e",
+							pattern,
+							target,
+						];
+			const child = spawn(cmd, args, {
+				stdio: ["ignore", "pipe", "pipe"],
+				signal,
+			});
+			const out: Buffer[] = [];
+			const err: Buffer[] = [];
+			child.stdout!.on("data", (c: Buffer) => out.push(c));
+			child.stderr!.on("data", (c: Buffer) => err.push(c));
+			child.on("error", (e: NodeJS.ErrnoException) =>
+				res({
+					enoent: e.code === "ENOENT",
+					code: 1,
+					stdout: "",
+					stderr: e.message,
+				}),
+			);
+			child.on("close", (code) =>
+				res({
+					enoent: false,
+					code: code ?? 1,
+					stdout: Buffer.concat(out).toString(),
+					stderr: Buffer.concat(err).toString().trim(),
+				}),
+			);
+		});
+
+	return runOne("rg")
+		.then((r) => (r.enoent ? runOne("grep") : r))
+		.then(({ code, stdout, stderr }) => {
+			if (signal?.aborted) throw new Error("Aborted");
+
+			const allLines = stdout.split("\n").filter(Boolean);
+			const truncated = allLines.length > limit;
+			const kept = allLines.slice(0, limit);
+
+			// Exit 1 in rg/grep = "no matches"; ≥2 = real error.
+			const errNote =
+				code >= 2 && stderr ? `\n[fallback exit ${code}: ${stderr}]` : "";
+			const header = `# fallback grep (path outside cwd: ${target})${
+				truncated ? ` — truncated ${limit}/${allLines.length}` : ""
+			}`;
+			const text = kept.length
+				? `${header}\n${kept.join("\n")}${errNote}`
+				: `No matches found${errNote}`;
+
+			return { content: [{ type: "text" as const, text }], details: {} };
+		});
 }
 
 // --- ygrep helpers ---
