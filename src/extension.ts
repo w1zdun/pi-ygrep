@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { existsSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -52,12 +53,14 @@ const grepSchema = Type.Object({
 	}),
 	path: Type.Optional(
 		Type.String({
-			description: "Directory to search in (default: current directory)",
+			description:
+				"File or directory to scope the search. Resolved relative to cwd; '~/' expands to home. Paths inside cwd filter results (text-only, semantic search is disabled when path is set); absolute paths outside cwd switch workspace (must be pre-indexed).",
 		}),
 	),
 	glob: Type.Optional(
 		Type.String({
-			description: "File extension filter (e.g. '*.ts'). Maps to ygrep -e",
+			description:
+				"Single file extension filter (e.g., '*.ts' or 'ts'). Maps to ygrep -e",
 		}),
 	),
 	ignoreCase: Type.Optional(
@@ -159,42 +162,66 @@ function createYgrepGrepTool(cwd: string) {
 			const { pattern, path: searchPath, glob, context, limit } = input;
 			const effectiveLimit = limit ?? DEFAULT_LIMIT;
 
-			const args: string[] = [pattern, "-n", String(effectiveLimit)];
+			const args: string[] = ["-n", String(effectiveLimit)];
 
 			// Path semantics: -C is the (indexed) workspace root, -p is a
-			// path/glob filter inside it. If `path` is empty → search the whole
-			// cwd workspace. If it's inside cwd → keep cwd as workspace and
-			// pass the relative remainder via -p. If it's outside cwd → treat
-			// it as a separate workspace root.
+			// path glob filter inside it. If `path` is empty → search the
+			// whole cwd workspace. Inside cwd → keep cwd as workspace and
+			// pass the relative remainder via -p (with trailing `/` for
+			// directories so ygrep treats it as a subtree glob, not a
+			// literal match on the directory entry). Outside cwd → treat as
+			// a separate workspace root.
 			let workspace = cwd;
 			let pathFilter: string | undefined;
 			if (searchPath) {
-				const expanded = searchPath.startsWith("~/")
-					? join(process.env.HOME || "", searchPath.slice(2))
-					: searchPath;
+				const home = homedir();
+				const expanded =
+					searchPath === "~"
+						? home
+						: searchPath.startsWith("~/")
+							? join(home, searchPath.slice(2))
+							: searchPath;
 				const absolute = isAbsolute(expanded)
 					? resolve(expanded)
 					: resolve(cwd, expanded);
 				if (absolute === cwd) {
 					workspace = cwd;
-				} else if (absolute.startsWith(`${cwd}/`)) {
-					workspace = cwd;
-					pathFilter = absolute.slice(cwd.length + 1);
 				} else {
-					workspace = absolute;
+					const rel = relative(cwd, absolute);
+					if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
+						workspace = cwd;
+						let isDir = false;
+						try {
+							isDir = statSync(absolute).isDirectory();
+						} catch {
+							// Path doesn't exist — pass as-is; ygrep will
+							// return no matches.
+						}
+						pathFilter = isDir ? `${rel}/` : rel;
+					} else {
+						workspace = absolute;
+					}
 				}
 			}
 			args.push("-C", workspace);
-			if (pathFilter) args.push("-p", pathFilter);
+			if (pathFilter) {
+				// ygrep's `-p` is silently ignored in hybrid (text+semantic)
+				// mode — forcing --text-only is the only way to actually
+				// scope results to the requested path.
+				args.push("-p", pathFilter, "--text-only");
+			}
 
 			if (glob) {
-				const ext = glob.replace(/[*?.]/g, "");
+				const ext = glob.match(/(?:^|\.)([a-zA-Z0-9]+)$/)?.[1];
 				if (ext) args.push("-e", ext);
 			}
 
 			if (context) {
 				args.push("-K", String(context));
 			}
+
+			// `--` ensures a pattern starting with `-` isn't parsed as a flag.
+			args.push("--", pattern);
 
 			return new Promise((resolve, reject) => {
 				const child: ChildProcess = spawn("ygrep", args, {
@@ -217,21 +244,22 @@ function createYgrepGrepTool(cwd: string) {
 					const stdout = Buffer.concat(stdoutChunks).toString().trim();
 					const stderr = Buffer.concat(stderrChunks).toString().trim();
 
-					if (code !== 0) {
-						const msg = stderr || `ygrep exited with code ${code}`;
-						if (!stdout) {
-							reject(new Error(msg));
-							return;
-						}
+					if (code !== 0 && !stdout) {
+						reject(
+							new Error(stderr || `ygrep exited with code ${code}`),
+						);
+						return;
 					}
 
-					const result = {
-						content: [
-							{ type: "text" as const, text: stdout || "No matches found" },
-						],
+					const text =
+						code !== 0 && stderr
+							? `${stdout}\n\n[ygrep exited ${code}: ${stderr}]`
+							: stdout || "No matches found";
+
+					resolve({
+						content: [{ type: "text" as const, text }],
 						details: {},
-					};
-					resolve(result);
+					});
 				});
 			});
 		},
