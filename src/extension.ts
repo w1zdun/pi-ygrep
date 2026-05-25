@@ -54,7 +54,7 @@ const grepSchema = Type.Object({
 	path: Type.Optional(
 		Type.String({
 			description:
-				"File or directory to scope the search. Resolved relative to cwd; '~/' expands to home. Paths inside cwd filter results (text-only, semantic search is disabled when path is set). Paths outside cwd fall back to ripgrep/grep (real-time, no index, literal matching only).",
+				"File or directory to scope the search. Resolved relative to cwd; '~/' expands to home. Paths inside cwd filter results (text-only, semantic search disabled). Paths outside cwd use ygrep if that workspace is already indexed; otherwise fall back to ripgrep/grep (real-time, literal matching only).",
 		}),
 	),
 	glob: Type.Optional(
@@ -199,17 +199,20 @@ function createYgrepGrepTool(cwd: string) {
 						}
 						pathFilter = isDir ? `${rel}/` : rel;
 					} else {
-						// Outside cwd → fall back to ripgrep/grep. ygrep would
-						// need a separate indexed+watched workspace; the
-						// extension only manages one (cwd).
-						return runFallbackGrep({
-							pattern,
-							target: absolute,
-							glob,
-							context,
-							limit: effectiveLimit,
-							signal,
-						});
+						// Outside cwd → try existing ygrep index for that
+						// workspace; if none, fall back to ripgrep/grep.
+						if (await findMatchingIndex(absolute, cwd)) {
+							workspace = absolute;
+						} else {
+							return runFallbackGrep({
+								pattern,
+								target: absolute,
+								glob,
+								context,
+								limit: effectiveLimit,
+								signal,
+							});
+						}
 					}
 				}
 			}
@@ -276,10 +279,35 @@ function createYgrepGrepTool(cwd: string) {
 	};
 }
 
-// External-path fallback: when `path` resolves outside cwd, ygrep would need
-// to switch to a workspace we don't index or watch. Use ripgrep (preferred —
-// fast, gitignore-aware) or plain grep instead. Literal matching, no
-// semantic, but always fresh and never errors on "workspace not indexed".
+// External-path handling: when `path` resolves outside cwd, prefer an
+// existing ygrep index if one matches; otherwise fall back to ripgrep
+// (preferred — fast, gitignore-aware) or plain grep. ygrep-indexed external
+// workspaces keep subtoken + semantic matching; fallback is literal-only but
+// always fresh and never errors on "workspace not indexed".
+
+// Parses `ygrep indexes list` plain-text output. Each indexed workspace is
+// rendered on its own line as 6 spaces + path + "  (hash16)". Tildes are
+// already abbreviated by ygrep; expand them back for comparison.
+function findMatchingIndex(
+	absolute: string,
+	cwd: string,
+): Promise<boolean> {
+	return runYgrep(["indexes", "list"], cwd).then(({ code, stdout }) => {
+		if (code !== 0) return false;
+		const home = homedir();
+		const re = /^ {6}(.+?)\s+\([0-9a-f]{16}\)\s*$/;
+		for (const line of stdout.split("\n")) {
+			const m = re.exec(line);
+			if (!m) continue;
+			let ws = m[1];
+			if (ws === "~") ws = home;
+			else if (ws.startsWith("~/")) ws = join(home, ws.slice(2));
+			if (ws === absolute) return true;
+		}
+		return false;
+	});
+}
+
 type FallbackResult = {
 	content: Array<{ type: "text"; text: string }>;
 	details: Record<string, unknown>;
