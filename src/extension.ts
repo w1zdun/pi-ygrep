@@ -406,13 +406,14 @@ function runFallbackGrep(opts: {
 
 // --- ygrep helpers ---
 // `ygrep watch` is blocking by design (no --daemon flag). Spawn it detached so
-// the parent (pi) doesn't keep it tied to its lifecycle. Resolves true once the
-// child has stayed alive briefly without exiting/erroring.
+// the parent (pi) doesn't keep it tied to its lifecycle. Pass cwd as the
+// positional path so pgrep can match it later for dedup. Resolves true once
+// the child has stayed alive briefly without exiting/erroring.
 function startYgrepWatchDetached(cwd: string): Promise<boolean> {
 	return new Promise((resolve) => {
 		let child: ChildProcess;
 		try {
-			child = spawn("ygrep", ["watch"], {
+			child = spawn("ygrep", ["watch", cwd], {
 				cwd,
 				stdio: "ignore",
 				detached: true,
@@ -432,6 +433,31 @@ function startYgrepWatchDetached(cwd: string): Promise<boolean> {
 		child.on("exit", () => settle(false));
 		setTimeout(() => settle(true), 200);
 	});
+}
+
+// ygrep doesn't refuse duplicate watchers, so we dedup ourselves: pgrep -f
+// matches "ygrep watch <cwd>" in any process's full command line. Requires
+// startYgrepWatchDetached to pass cwd as a positional arg (otherwise the
+// argv is just "ygrep watch" and we can't distinguish workspaces).
+function isYgrepWatchRunning(cwd: string): Promise<boolean> {
+	return new Promise((resolve) => {
+		const child: ChildProcess = spawn(
+			"pgrep",
+			["-f", `ygrep watch ${cwd}`],
+			{ stdio: ["ignore", "pipe", "ignore"] },
+		);
+		let out = "";
+		child.stdout!.on("data", (c: Buffer) => (out += c.toString()));
+		child.on("error", () => resolve(false));
+		child.on("close", () => resolve(out.trim().length > 0));
+	});
+}
+
+// Idempotent watcher start: detects an existing watcher first; only spawns if
+// none is running. Returns true if a watcher is now running for cwd.
+async function ensureYgrepWatch(cwd: string): Promise<boolean> {
+	if (await isYgrepWatchRunning(cwd)) return true;
+	return startYgrepWatchDetached(cwd);
 }
 
 function runYgrep(
@@ -523,6 +549,18 @@ export default async function (pi: ExtensionAPI) {
 		},
 	});
 
+	const maybeAutoWatch = (ctx: {
+		ui: { notify: (m: string, t?: "info" | "error" | "warning") => void };
+	}) => {
+		if (!config.autoWatch) return;
+		ensureYgrepWatch(cwd).then((ok) => {
+			if (ok) {
+				watchState.startedInSession = true;
+				ctx.ui.notify("ygrep: watch active (background)", "info");
+			}
+		});
+	};
+
 	pi.registerCommand("ygrep-rebuild", {
 		description: "Rebuild ygrep text-only index (fast)",
 		handler: async (_args, ctx) => {
@@ -531,6 +569,7 @@ export default async function (pi: ExtensionAPI) {
 			if (code === 0) {
 				const files = stdout.match(/Files indexed: (\d+)/)?.[1] || "?";
 				ctx.ui.notify(`ygrep: text index rebuilt (${files} files)`, "info");
+				maybeAutoWatch(ctx);
 			} else {
 				ctx.ui.notify(`ygrep: ${stderr || "failed"}`, "error");
 			}
@@ -551,6 +590,7 @@ export default async function (pi: ExtensionAPI) {
 			if (code === 0) {
 				const files = stdout.match(/Files indexed: (\d+)/)?.[1] || "?";
 				ctx.ui.notify(`ygrep: semantic index rebuilt (${files} files)`, "info");
+				maybeAutoWatch(ctx);
 			} else {
 				ctx.ui.notify(`ygrep: ${stderr || "failed"}`, "error");
 			}
@@ -560,6 +600,11 @@ export default async function (pi: ExtensionAPI) {
 	pi.registerCommand("ygrep-watch", {
 		description: "Start ygrep watch in background (auto-update index on file changes)",
 		handler: async (_args, ctx) => {
+			if (await isYgrepWatchRunning(cwd)) {
+				watchState.startedInSession = true;
+				ctx.ui.notify("ygrep: watch already running (background)", "info");
+				return;
+			}
 			ctx.ui.notify("ygrep: starting watch mode (background)...", "info");
 			const ok = await startYgrepWatchDetached(cwd);
 			if (ok) {
@@ -639,6 +684,7 @@ export default async function (pi: ExtensionAPI) {
 						`ygrep: ${type} index rebuilt (${files} files)`,
 						"info",
 					);
+					maybeAutoWatch(ctx);
 				} else {
 					ctx.ui.notify(`ygrep: rebuild failed: ${stderr}`, "error");
 				}
@@ -652,14 +698,20 @@ export default async function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		const git = await isInGitRepo(cwd);
 		const status = await checkIndexStatus(cwd);
+		// `ygrep status` is the primary check, but `ygrep indexes list` is
+		// the authoritative source — it catches cases where status reports
+		// "no" but an index exists (e.g., the index entry uses a different
+		// canonical path than ygrep's per-cwd lookup resolves to).
+		const indexed =
+			status.indexed || (await findMatchingIndex(cwd, cwd));
 
-		if (status.indexed) {
-			// Index exists — start watch if configured
+		if (indexed) {
+			// Index exists (git or not) — start watch if configured
 			if (config.autoWatch) {
-				startYgrepWatchDetached(cwd).then((ok) => {
+				ensureYgrepWatch(cwd).then((ok) => {
 					if (ok) {
 						watchState.startedInSession = true;
-						ctx.ui.notify("ygrep: watch started (background)", "info");
+						ctx.ui.notify("ygrep: watch active (background)", "info");
 					}
 				});
 			}
@@ -683,10 +735,10 @@ export default async function (pi: ExtensionAPI) {
 				const files = stdout.match(/Files indexed: (\d+)/)?.[1] || "?";
 				ctx.ui.notify(`ygrep: indexed ${files} files`, "info");
 				if (config.autoWatch) {
-					startYgrepWatchDetached(cwd).then((ok) => {
+					ensureYgrepWatch(cwd).then((ok) => {
 						if (ok) {
 							watchState.startedInSession = true;
-							ctx.ui.notify("ygrep: watch started (background)", "info");
+							ctx.ui.notify("ygrep: watch active (background)", "info");
 						}
 					});
 				}
